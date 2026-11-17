@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FacPreset.hpp"
+#include "DfxDsp.h"
 #include "SosBiquad.hpp"
 
 #include <array>
@@ -75,6 +76,7 @@ private:
     std::atomic<bool> loudnessNormalized_{true};
 
     mutable std::mutex paramMutex_;
+    ::DfxDsp original_;
 
     // Normalized [0.0f, 1.0f] effect amounts from .fac Main[0..5]
     float clarityAmount_ = 0.39f;       // Main 0 (aural0)

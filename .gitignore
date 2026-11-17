@@ -1,0 +1,10 @@
+/build*/
+/analysis/
+/tools/
+/.*
+!/.gitignore
+/*.zip
+/*.png
+/FxSound/*
+!/FxSound/Factsoft/
+!/FxSound/BonusPresets/

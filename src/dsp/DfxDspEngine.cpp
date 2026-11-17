@@ -56,6 +56,7 @@ void DfxDspEngine::setSampleRate(float sampleRateHz) {
 
     std::lock_guard<std::mutex> lock(paramMutex_);
     eq_.setSampleRate(clampedFs);
+    original_.setSignalFormat(32, 2, static_cast<int>(clampedFs), 32);
 
     const float scale = clampedFs / 44100.0f;
     for (size_t i = 0; i < 4; ++i) {
@@ -88,6 +89,16 @@ void DfxDspEngine::applyPreset(const FacPreset& preset) {
     dynamicBoostAmount_ = preset.getEffectNormalized(EffectIndex::DynamicBoost);
     bassBoostAmount_    = preset.getEffectNormalized(EffectIndex::BassBoost);
 
+    original_.setNumBands(10);
+    original_.eqOn(preset.eqEnabled);
+    original_.powerOn(true);
+    const float effects[] = {clarityAmount_, ambienceAmount_, surroundAmount_, dynamicBoostAmount_, bassBoostAmount_};
+    for (int e = 0; e < 5; ++e)
+        original_.setEffectValue(static_cast<::DfxDsp::Effect>(e), effects[e] * 10.0f);
+    for (int b = 0; b < 10; ++b) {
+        original_.setEqBandFrequency(b, preset.bands[b].centerFreqHz);
+        original_.setEqBandBoostCut(b, preset.bands[b].boostDb);
+    }
     eq_.setEnabled(preset.eqEnabled);
     for (size_t b = 0; b < SosEqualizer::kNumBands; ++b) {
         eq_.setBandParameters(b, preset.bands[b].centerFreqHz, preset.bands[b].boostDb);
@@ -207,104 +218,12 @@ void DfxDspEngine::processStereoInterleaved(float* interleavedStereo, size_t num
         return std::clamp(sign * compressed, -1.0f, 1.0f);
     };
 
+    std::vector<float> dry(interleavedStereo, interleavedStereo + numFrames * 2);
+    original_.processAudio(reinterpret_cast<short*>(interleavedStereo), reinterpret_cast<short*>(interleavedStereo), static_cast<int>(numFrames), 0);
     for (size_t i = 0; i < numFrames; ++i) {
-        float L = interleavedStereo[2 * i];
-        float R = interleavedStereo[2 * i + 1];
-        const float inPowerSample = 0.5f * (L * L + R * R);
-
-        // Stage 1: 10-Band SOS Equalizer (SosProcess @ 0x1400e5b79)
-        eq_.processStereoFrame(L, R);
-
-        // Stage 2: Bass Boost (max0 @ 0x1400dcd7d) - Smooth Butterworth Low-Shelf + Sub-Bass Punch
-        if (bassBoost > 0.005f) {
-            const float dryL = L;
-            const float dryR = R;
-            bassLowShelf_.processStereo(L, R);
-            bassPunchPeak_.processStereo(L, R);
-
-            // Subtle (<4%) even/odd-order warmth on the low-frequency delta only (zero midrange mud)
-            const float lowDeltaL = L - dryL;
-            const float lowDeltaR = R - dryR;
-            const float warmMix = 0.04f * bassBoost;
-            L += warmMix * std::tanh(lowDeltaL * 1.4f);
-            R += warmMix * std::tanh(lowDeltaR * 1.4f);
-        }
-
-        // Stage 3: Clarity (aural0 @ 0x1400dcd4d) - High-Shelf Presence + Transparent Air Sheen
-        if (clarity > 0.005f) {
-            float excL = clarityExciterBand_.processLeft(L);
-            float excR = clarityExciterBand_.processRight(R);
-            const float sheenMix = 0.06f * clarity;
-            excL = std::tanh(excL * (1.0f + 1.2f * clarity)) * sheenMix;
-            excR = std::tanh(excR * (1.0f + 1.2f * clarity)) * sheenMix;
-
-            clarityHighShelf_.processStereo(L, R);
-            L += excL;
-            R += excR;
-        }
-
-        // Stage 4: Surround Sound (wid0 + BinauralSyn @ 0x1400df961)
-        // Phase-coherent Mid/Side high-shelf widening + all-pass stereo decorrelation (zero comb filtering)
-        if (surround > 0.005f) {
-            const float mid  = 0.5f * (L + R);
-            const float side = 0.5f * (L - R);
-
-            // Boost stereo Side channel above 220 Hz while keeping sub-bass anchored in the center
-            const float shapedSide = surroundSideShelf_.processLeft(side);
-            // All-pass phase decorrelator creates natural stereo width even on narrow/centered sources
-            const float decorrelatedMid = surroundAllPass_.process(surroundSideShelf_.processRight(mid) - mid);
-
-            const float widthFactor = 1.0f + 0.85f * surround;
-            const float wideSide = shapedSide * widthFactor + (0.32f * surround) * decorrelatedMid;
-
-            L = mid + wideSide;
-            R = mid - wideSide;
-        }
-
-        // Stage 5: Ambience (lex0 @ 0x1400dcdad) - Band-Limited Lexicon/Schroeder Room Reverberation
-        if (ambience > 0.005f) {
-            // Band-limit reverb input around 250 Hz - 3.5 kHz so bass kicks never muddy the room tail
-            const float cleanInL = reverbInputBandPass_.processLeft(L);
-            const float cleanInR = reverbInputBandPass_.processRight(R);
-            const float revInputL = 0.40f * (cleanInL + 0.30f * cleanInR);
-            const float revInputR = 0.40f * (cleanInR + 0.30f * cleanInL);
-
-            float outL = 0.0f;
-            float outR = 0.0f;
-            for (size_t c = 0; c < 4; ++c) {
-                outL += combsL_[c].process(revInputL);
-                outR += combsR_[c].process(revInputR);
-            }
-            outL *= 0.32f;
-            outR *= 0.32f;
-            for (size_t a = 0; a < 2; ++a) {
-                outL = allpassL_[a].process(outL);
-                outR = allpassR_[a].process(outR);
-            }
-
-            const float wetMix = 0.45f * ambience;
-            const float dryMix = 1.0f - 0.06f * ambience;
-            L = dryMix * L + wetMix * (outL + 0.20f * outR);
-            R = dryMix * R + wetMix * (outR + 0.20f * outL);
-        }
-
-        // Stage 6: Dynamic Boost (apt0 + cmp0 + ply0 @ 0x1400dcddd)
-        // Smooth studio RMS leveling (15 ms attack, 250 ms release — zero beat pumping)
-        if (dynBoost > 0.005f) {
-            const float frameEnergy = std::sqrt(0.5f * (L * L + R * R));
-            const float coeff = (frameEnergy > dynEnvRms_) ? 0.0014f : 0.00008f;
-            dynEnvRms_ = (1.0f - coeff) * dynEnvRms_ + coeff * frameEnergy;
-
-            const float envClamped = std::clamp(dynEnvRms_, 0.03f, 0.90f);
-            const float ratio = 0.18f * dynBoost;
-            const float makeup = 1.0f + 0.18f * dynBoost;
-            const float targetGain = std::clamp(makeup * std::pow(envClamped / 0.22f, -ratio), 0.78f, 1.45f);
-            dynGainSmooth_ = 0.9985f * dynGainSmooth_ + 0.0015f * targetGain;
-
-            L *= dynGainSmooth_;
-            R *= dynGainSmooth_;
-        }
-
+        float L = interleavedStereo[2*i];
+        float R = interleavedStereo[2*i+1];
+        const float inPowerSample = 0.5f * (dry[2*i]*dry[2*i] + dry[2*i+1]*dry[2*i+1]);
         // Continuous per-sample Loudness Trim + Quiet/Normal/HighNormal Volume Mode (zero block zipper noise)
         float targetMasterGain = modeScale;
         if (normalizeLoudness) {

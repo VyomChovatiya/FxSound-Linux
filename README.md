@@ -10,7 +10,7 @@ compatibility service or PulseAudio.
 
 ## Status
 
-The DSP is a custom implementation. Identical sound or feature parity with the
+On the `original-dsp-integration` branch the original FxSound DSP replaces the custom effects. See [integration notes](docs/original-dsp-integration.md). The main branch uses a custom implementation. Identical sound or feature parity with the
 Windows FxSound engine has **not** been established. Existing DSP tests check
 this implementation's behavior; they are not Windows reference comparisons.
 
