@@ -1,10 +1,44 @@
+# Local build trees and generated files
 /build*/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Testing/
+compile_commands.json
+*.o
+*.a
+*.so
+*.so.*
+*.log
+*.core
+
+# Local analysis, captures and supplied archives
 /analysis/
-/tools/
+/*.png
+/*.jpeg
+/*.jpg
+/*.zip
+__pycache__/
+*.py[cod]
+
+# Private workspace state; keep repository configuration visible
 /.*
 !/.gitignore
-/*.zip
-/*.png
+!/.gitattributes
+!/.editorconfig
+!/.github/
+.env
+.env.*
+!.env.example
+
+# Windows reference installation: only preset data belongs in this repository
 /FxSound/*
 !/FxSound/Factsoft/
 !/FxSound/BonusPresets/
+*.exe
+*.dll
+*.sys
+*.pdb
+
+# Locally supplied fonts with unresolved redistribution provenance
+/assets/fonts/
