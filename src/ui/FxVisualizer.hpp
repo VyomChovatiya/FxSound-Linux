@@ -47,7 +47,7 @@ private:
     bool poweredOn_ = true;
     bool userEnabled_ = true;
     bool windowVisible_ = true;
-    float idlePhase_ = 0.0f;
+    std::array<std::array<float, 5>, DfxDspEngine::kSpectrumBandCount> history_{};
 
     std::array<float, DfxDspEngine::kSpectrumBandCount> displayBands_{};
     std::array<float, DfxDspEngine::kSpectrumBandCount> peakHolds_{};

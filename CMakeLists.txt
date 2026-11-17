@@ -56,3 +56,11 @@ target_compile_options(test_fxsound PRIVATE -O2 -Wall -Wextra)
 add_test(NAME FxSoundDspAndPresetsTest COMMAND test_fxsound WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME OriginalDspSmokeTest COMMAND original_dsp_selftest ${CMAKE_CURRENT_SOURCE_DIR}/FxSound/Factsoft)
 target_compile_options(test_fxsound PRIVATE -UNDEBUG)
+
+# Bundle resources with out-of-tree builds and refresh them on every build.
+add_custom_target(fxsound_resources ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:fxsound>/resources/assets
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/FxSound/Factsoft $<TARGET_FILE_DIR:fxsound>/resources/FxSound/Factsoft
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/FxSound/BonusPresets $<TARGET_FILE_DIR:fxsound>/resources/FxSound/BonusPresets
+)
+add_dependencies(fxsound fxsound_resources)

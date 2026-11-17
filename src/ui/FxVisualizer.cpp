@@ -18,8 +18,8 @@ FxVisualizer::FxVisualizer(DfxDspEngine& dspEngine, QWidget* parent)
     eyeOpenPix_   = theme.loadPngPixmap("icons8-eye-48.png");
     eyeClosedPix_ = theme.loadPngPixmap("icons8-closed-eye-48.png");
 
-    displayBands_.fill(0.18f);
-    peakHolds_.fill(0.22f);
+    displayBands_.fill(0.0f);
+    peakHolds_.fill(0.0f);
 
     eyeToggleBtn_ = new QPushButton(this);
     eyeToggleBtn_->setFixedSize(28, 28);
@@ -87,29 +87,14 @@ void FxVisualizer::resizeEvent(QResizeEvent* event) {
 }
 
 void FxVisualizer::onFrameTick() {
-    idlePhase_ += 0.09f;
     const auto liveBands = dspEngine_.getSpectrumBands();
-
-    bool hasSignal = false;
-    for (float v : liveBands) {
-        if (v > 0.04f) {
-            hasSignal = true;
-            break;
-        }
-    }
-
     for (size_t i = 0; i < DfxDspEngine::kSpectrumBandCount; ++i) {
-        float target = liveBands[i];
-        if (!hasSignal && poweredOn_) {
-            // Subtle ambient EQ breathing curve when idle & powered on
-            const float eqDb = dspEngine_.evaluateEqResponseDb(60.0f * std::pow(1.32f, static_cast<float>(i)));
-            const float eqNorm = std::clamp((eqDb + 12.0f) / 24.0f, 0.12f, 0.85f);
-            const float wave = 0.06f * std::sin(idlePhase_ + static_cast<float>(i) * 0.42f)
-                             + 0.04f * std::cos(idlePhase_ * 0.7f - static_cast<float>(i) * 0.25f);
-            target = std::clamp(0.22f + 0.36f * eqNorm + wave, 0.10f, 0.78f);
-        }
-
-        displayBands_[i] = 0.35f * displayBands_[i] + 0.65f * target;
+        const float target = std::pow(std::clamp((liveBands[i] - 0.15f) / 0.7f, 0.0f, 1.0f), 1.25f);
+        const float speed = target > displayBands_[i] ? 0.72f : 0.16f;
+        displayBands_[i] += speed * (target - displayBands_[i]);
+        for (size_t age = history_[i].size() - 1; age > 0; --age)
+            history_[i][age] = history_[i][age - 1];
+        history_[i][0] = displayBands_[i];
         if (displayBands_[i] > peakHolds_[i]) {
             peakHolds_[i] = displayBands_[i];
         } else {
@@ -141,21 +126,36 @@ void FxVisualizer::paintEvent(QPaintEvent* /*event*/) {
 
     if (!userEnabled_) return;
 
-    constexpr int columns = 110;
-    const float inset = width() * 0.06f;
+    // Each band emits a short mirrored history: new transients appear in the
+    // middle and travel outward, following FxSound's original visual rhythm.
+    constexpr int barsPerBand = 7;
+    constexpr int columns = DfxDspEngine::kSpectrumBandCount * barsPerBand;
+    const float inset = width() * 0.045f;
     const float step = (width() - inset * 2) / columns;
-    const float center = height() * 0.5f;
-    const float maximum = height() * 0.78f;
+    const float center = height() * 0.55f;
+    const float maximum = height() * 0.80f;
     p.setPen(Qt::NoPen);
     for (int col = 0; col < columns; ++col) {
-        const float pos = float(col) / (columns - 1) * (DfxDspEngine::kSpectrumBandCount - 1);
-        const auto a = static_cast<size_t>(pos);
-        const auto b = std::min(a + 1, DfxDspEngine::kSpectrumBandCount - 1);
-        const float fraction = pos - a;
-        const float level = poweredOn_ ? displayBands_[a] * (1 - fraction) + displayBands_[b] * fraction : 0;
-        const float barHeight = std::clamp(level * maximum, 2.0f, maximum);
-        p.setBrush(poweredOn_ ? FxTheme::kCrimsonPrimary : FxTheme::kDisabledGrey);
-        p.drawRect(QRectF(inset + col * step, center - barHeight / 2, step * 0.58f, barHeight));
+        const size_t band = col / barsPerBand;
+        const int age = std::abs(col % barsPerBand - barsPerBand / 2);
+        const float level = poweredOn_ ? history_[band][age] : 0.0f;
+        const float barHeight = std::max(2.0f, level * maximum);
+        const float x = inset + col * step;
+        const float barWidth = std::max(1.5f, step * 0.55f);
+        const QRectF bar(x, center - barHeight / 2, barWidth, barHeight);
+        if (level > 0.1f) {
+            QColor halo = FxTheme::kCrimsonPrimary;
+            halo.setAlphaF(level * 0.13f);
+            p.setBrush(halo);
+            p.drawRoundedRect(bar.adjusted(-2, -2, 2, 2), 3, 3);
+        }
+        QLinearGradient gradient(0, center - maximum / 2, 0, center + maximum / 2);
+        gradient.setColorAt(0, QColor("#ffb0c1"));
+        gradient.setColorAt(0.30, QColor("#ff567c"));
+        gradient.setColorAt(0.55, FxTheme::kCrimsonPrimary);
+        gradient.setColorAt(1, QColor("#811d39"));
+        p.setBrush(poweredOn_ ? QBrush(gradient) : QBrush(FxTheme::kDisabledGrey));
+        p.drawRoundedRect(bar, 0.8, 0.8);
     }
 }
 

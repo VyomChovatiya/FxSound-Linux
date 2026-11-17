@@ -33,6 +33,38 @@ std::string runCommandOutput(const std::string& cmd) {
     return result;
 }
 
+// Keep the virtual control and hardware at one logical volume. Remove the
+// virtual sink's gain from captured samples so attenuation occurs only once.
+struct VolumeLink {
+    std::string hardware;
+    pa_cvolume volume{};
+    bool ready = false;
+    bool muted = false;
+};
+void initializeVolume(pa_context* c, const pa_sink_info* info, int eol, void* data) {
+    auto* link = static_cast<VolumeLink*>(data);
+    if (eol || !info) return;
+    link->volume = info->volume;
+    link->muted = info->mute;
+    auto* op = pa_context_set_sink_volume_by_name(c, LinuxAudioEngine::kVirtualSinkName, &info->volume, nullptr, nullptr);
+    if (op) pa_operation_unref(op);
+    op = pa_context_set_sink_mute_by_name(c, LinuxAudioEngine::kVirtualSinkName, info->mute, nullptr, nullptr);
+    if (op) pa_operation_unref(op);
+    link->ready = true;
+}
+void followVolume(pa_context* c, const pa_sink_info* info, int eol, void* data) {
+    auto* link = static_cast<VolumeLink*>(data);
+    if (eol || !info || !link->ready) return;
+    if (!pa_cvolume_equal(&link->volume, &info->volume) || link->muted != bool(info->mute)) {
+        link->volume = info->volume;
+        link->muted = info->mute;
+        auto* op = pa_context_set_sink_volume_by_name(c, link->hardware.c_str(), &info->volume, nullptr, nullptr);
+        if (op) pa_operation_unref(op);
+        op = pa_context_set_sink_mute_by_name(c, link->hardware.c_str(), info->mute, nullptr, nullptr);
+        if (op) pa_operation_unref(op);
+    }
+}
+
 struct PulseSinkEnumContext {
     pa_mainloop* mainloop = nullptr;
     std::string defaultSinkName;
@@ -311,18 +343,30 @@ void LinuxAudioEngine::audioThreadLoop() {
     const std::string monitorSource = std::string(kVirtualSinkName) + ".monitor";
     std::vector<float> audioBuffer(kSamplesPerBlock, 0.0f);
 
-    pa_simple* captureStream = nullptr;
-    pa_simple* playbackStream = nullptr;
+    VolumeLink volumeLink;
+    auto nextVolumeCheck = std::chrono::steady_clock::now();
+    pa_stream* captureStream = nullptr;
+    pa_stream* playbackStream = nullptr;
+    pa_context* playbackContext = nullptr;
+    pa_mainloop* playbackLoop = nullptr;
 
     auto closeStreams = [&]() {
         if (captureStream) {
-            pa_simple_free(captureStream);
+            pa_stream_disconnect(captureStream);
+            pa_stream_unref(captureStream);
             captureStream = nullptr;
         }
         if (playbackStream) {
-            pa_simple_free(playbackStream);
+            pa_stream_disconnect(playbackStream);
+            pa_stream_unref(playbackStream);
             playbackStream = nullptr;
         }
+        if (playbackContext) {
+            pa_context_disconnect(playbackContext);
+            pa_context_unref(playbackContext);
+            playbackContext = nullptr;
+        }
+        if (playbackLoop) { pa_mainloop_free(playbackLoop); playbackLoop = nullptr; }
     };
 
     while (!stopRequested_.load(std::memory_order_relaxed)) {
@@ -335,31 +379,55 @@ void LinuxAudioEngine::audioThreadLoop() {
                 outSink = targetSinkId_;
             }
 
-            int paErr = 0;
-            captureStream = pa_simple_new(
-                nullptr,
-                "FxSound",
-                PA_STREAM_RECORD,
-                monitorSource.c_str(),
-                "FxSound Virtual Sink Capture",
-                &sampleSpec,
-                nullptr,
-                &recordAttr,
-                &paErr
-            );
+            // Never follow the system default: it may be our own input sink.
+            if (outSink.empty() || outSink == kVirtualSinkName) {
+                closeStreams();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+            playbackLoop = pa_mainloop_new();
+            playbackContext = pa_context_new(pa_mainloop_get_api(playbackLoop), "FxSound Output");
+            pa_context_connect(playbackContext, nullptr, PA_CONTEXT_NOFLAGS, nullptr);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!stopRequested_ && PA_CONTEXT_IS_GOOD(pa_context_get_state(playbackContext)) &&
+                   pa_context_get_state(playbackContext) != PA_CONTEXT_READY && std::chrono::steady_clock::now() < deadline) {
+                pa_mainloop_iterate(playbackLoop, 0, nullptr);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (pa_context_get_state(playbackContext) == PA_CONTEXT_READY) {
+                volumeLink.hardware = outSink;
+                volumeLink.ready = false;
+                auto* volumeOp = pa_context_get_sink_info_by_name(playbackContext, outSink.c_str(), initializeVolume, &volumeLink);
+                if (volumeOp) {
+                    while (!stopRequested_ && pa_operation_get_state(volumeOp) == PA_OPERATION_RUNNING && std::chrono::steady_clock::now() < deadline) {
+                        pa_mainloop_iterate(playbackLoop, 0, nullptr);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    pa_operation_cancel(volumeOp);
+                    pa_operation_unref(volumeOp);
+                }
+                playbackStream = pa_stream_new(playbackContext, "FxSound Enhanced Output", &sampleSpec, nullptr);
+                pa_stream_connect_playback(playbackStream, outSink.c_str(), &playbackAttr,
+                    static_cast<pa_stream_flags_t>(PA_STREAM_DONT_MOVE | PA_STREAM_ADJUST_LATENCY), nullptr, nullptr);
+                while (!stopRequested_ && PA_STREAM_IS_GOOD(pa_stream_get_state(playbackStream)) &&
+                       pa_stream_get_state(playbackStream) != PA_STREAM_READY && std::chrono::steady_clock::now() < deadline) {
+                    pa_mainloop_iterate(playbackLoop, 0, nullptr);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (pa_stream_get_state(playbackStream) != PA_STREAM_READY) closeStreams();
+            }
 
-            playbackStream = pa_simple_new(
-                nullptr,
-                "FxSound",
-                PA_STREAM_PLAYBACK,
-                outSink.empty() ? nullptr : outSink.c_str(),
-                "FxSound Enhanced Output",
-                &sampleSpec,
-                nullptr,
-                &playbackAttr,
-                &paErr
-            );
-
+            if (playbackStream && pa_stream_get_state(playbackStream) == PA_STREAM_READY) {
+                captureStream = pa_stream_new(playbackContext, "FxSound Virtual Sink Capture", &sampleSpec, nullptr);
+                pa_stream_connect_record(captureStream, monitorSource.c_str(), &recordAttr, PA_STREAM_DONT_MOVE);
+                deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (!stopRequested_ && PA_STREAM_IS_GOOD(pa_stream_get_state(captureStream)) &&
+                       pa_stream_get_state(captureStream) != PA_STREAM_READY && std::chrono::steady_clock::now() < deadline) {
+                    pa_mainloop_iterate(playbackLoop, 0, nullptr);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (pa_stream_get_state(captureStream) != PA_STREAM_READY) closeStreams();
+            }
             if (!captureStream || !playbackStream) {
                 closeStreams();
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -367,21 +435,51 @@ void LinuxAudioEngine::audioThreadLoop() {
             }
         }
 
-        int paErr = 0;
-        if (pa_simple_read(captureStream, audioBuffer.data(), audioBuffer.size() * sizeof(float), &paErr) < 0) {
+        if (std::chrono::steady_clock::now() >= nextVolumeCheck) {
+            auto* op = pa_context_get_sink_info_by_name(playbackContext, kVirtualSinkName, followVolume, &volumeLink);
+            if (op) pa_operation_unref(op);
+            nextVolumeCheck = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+        }
+        // Drain capture fragments directly; never allow the monitor to follow
+        // the default hardware sink and recapture our own enhanced playback.
+        pa_mainloop_iterate(playbackLoop, 0, nullptr);
+        const void* captured = nullptr;
+        size_t capturedBytes = 0;
+        if (pa_stream_get_state(captureStream) != PA_STREAM_READY ||
+            pa_stream_peek(captureStream, &captured, &capturedBytes) < 0) {
             closeStreams();
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
             continue;
+        }
+        if (!capturedBytes) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        audioBuffer.resize(capturedBytes / sizeof(float));
+        if (captured) std::memcpy(audioBuffer.data(), captured, capturedBytes);
+        else std::fill(audioBuffer.begin(), audioBuffer.end(), 0.0f);
+        pa_stream_drop(captureStream);
+        for (size_t i = 0; i < audioBuffer.size(); ++i) {
+            const unsigned channel = volumeLink.volume.channels > 1 ? i % 2 : 0;
+            const double gain = volumeLink.ready ? pa_sw_volume_to_linear(volumeLink.volume.values[channel]) : 0.0;
+            audioBuffer[i] = gain > 0.00001 && !volumeLink.muted ? audioBuffer[i] / gain : 0.0f;
         }
 
         // Run the full reversed FxSound DSP pipeline in-place on the 256-frame block
-        dspEngine_.processStereoInterleaved(audioBuffer.data(), kFramesPerBlock);
+        dspEngine_.processStereoInterleaved(audioBuffer.data(), audioBuffer.size() / 2);
 
-        if (pa_simple_write(playbackStream, audioBuffer.data(), audioBuffer.size() * sizeof(float), &paErr) < 0) {
+        const size_t bytes = audioBuffer.size() * sizeof(float);
+        while (!stopRequested_ && pa_stream_get_state(playbackStream) == PA_STREAM_READY &&
+               pa_stream_writable_size(playbackStream) < bytes) {
+            pa_mainloop_iterate(playbackLoop, 0, nullptr);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (stopRequested_) break;
+        if (pa_stream_get_state(playbackStream) != PA_STREAM_READY ||
+            pa_stream_write(playbackStream, audioBuffer.data(), bytes, nullptr, 0, PA_SEEK_RELATIVE) < 0) {
             closeStreams();
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
             continue;
         }
+        pa_mainloop_iterate(playbackLoop, 0, nullptr);
     }
 
     closeStreams();

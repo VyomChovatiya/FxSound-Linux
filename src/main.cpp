@@ -120,6 +120,13 @@ int main(int argc, char* argv[]) {
     }
 
     fxsound::FacPresetManager presetManager(factoryDir, userDir);
+    if (dumpMode) {
+        if (presetManager.presets().size() < 12) qFatal("Factory preset resources missing");
+        for (const auto* icon : {"Button_ON.svg", "Button_OFF.svg", "Logo.svg", "menu.svg", "settings.svg", "reset.svg"}) {
+            if (theme.loadSvgPixmap(icon, QSize(32, 32)).isNull())
+                qFatal("Required UI icon missing: %s", icon);
+        }
+    }
     fxsound::DfxDspEngine dspEngine;
     dspEngine.applyPreset(presetManager.currentPreset());
 

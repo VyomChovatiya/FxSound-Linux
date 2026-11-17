@@ -1,6 +1,6 @@
 # Original DSP integration experiment
 
-Branch: `original-dsp-integration`.
+The original DSP integration is now the main implementation on `main`.
 
 Uses the original FxSound DSP and Linux compatibility layer from
 https://github.com/biduzimr0x/fxsound-app at
@@ -28,5 +28,5 @@ ctest --test-dir /tmp/reversefx-original-build --output-on-failure
 /tmp/reversefx-original-build/fxsound
 ```
 
-Run from the project directory to locate resources. Existing `build/fxsound`
+Artwork and presets are bundled beside the executable, so it can launch from any directory. Existing `build/fxsound`
 is the previous executable and is not replaced by this build.

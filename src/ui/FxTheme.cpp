@@ -332,26 +332,24 @@ FxTheme& FxTheme::instance() {
 }
 
 void FxTheme::initialize(const std::filesystem::path& projectRoot) {
-    if (!projectRoot.empty() && std::filesystem::exists(projectRoot / "assets")) {
-        rootDir_ = projectRoot;
-    } else {
-        std::filesystem::path cwd = std::filesystem::current_path();
-        if (std::filesystem::exists(cwd / "assets")) {
-            rootDir_ = cwd;
-        } else if (std::filesystem::exists(cwd.parent_path() / "assets")) {
-            rootDir_ = cwd.parent_path();
-        } else if (QCoreApplication::instance()) {
-            std::filesystem::path appDir = QCoreApplication::applicationDirPath().toStdString();
-            if (std::filesystem::exists(appDir / "assets")) {
-                rootDir_ = appDir;
-            } else if (std::filesystem::exists(appDir.parent_path() / "assets")) {
-                rootDir_ = appDir.parent_path();
-            } else {
-                rootDir_ = cwd;
-            }
-        } else {
-            rootDir_ = cwd;
+    // Prefer the resource bundle shipped alongside this executable. A working
+    // directory is not a reliable resource location (desktop launchers use HOME).
+    const std::filesystem::path appDir = QCoreApplication::applicationDirPath().toStdString();
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const std::vector<std::filesystem::path> candidates = {
+        projectRoot, appDir / "resources", appDir, appDir.parent_path(), cwd, cwd.parent_path()
+    };
+    rootDir_.clear();
+    for (const auto& candidate : candidates) {
+        if (!candidate.empty() &&
+            std::filesystem::exists(candidate / "assets" / "svg" / "Button_ON.svg") &&
+            std::filesystem::exists(candidate / "FxSound" / "Factsoft" / "1.fac")) {
+            rootDir_ = candidate;
+            break;
         }
+    }
+    if (rootDir_.empty()) {
+        qFatal("FxSound resources missing: keep the resources folder beside the executable.");
     }
 
     loadFonts();

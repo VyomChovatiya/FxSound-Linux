@@ -260,22 +260,19 @@ void DfxDspEngine::updateSpectrumFromBlock(const float* interleavedStereo, size_
     std::array<float, kSpectrumBandCount> bandPeaks{};
     bandPeaks.fill(0.0f);
 
-    const size_t step = (numFrames > 128) ? 2 : 1;
+    const size_t step = 1; // Filters must receive every sample at their design rate.
     for (size_t i = 0; i < numFrames; i += step) {
         const float mono = 0.5f * (interleavedStereo[2 * i] + interleavedStereo[2 * i + 1]);
         for (size_t b = 0; b < kSpectrumBandCount; ++b) {
             const float filtered = spectrumFilters_[b].processLeft(mono);
-            const float tilt = 1.0f + 0.14f * static_cast<float>(b);
-            const float mag = std::fabs(filtered) * tilt;
-            if (mag > bandPeaks[b]) {
-                bandPeaks[b] = mag;
-            }
+            bandPeaks[b] += filtered * filtered;
         }
     }
 
     for (size_t b = 0; b < kSpectrumBandCount; ++b) {
-        const float db = 20.0f * std::log10(std::max(bandPeaks[b], 1e-4f));
-        const float target = std::clamp((db + 42.0f) / 42.0f, 0.0f, 1.0f);
+        const float rms = std::sqrt(bandPeaks[b] / std::max(size_t(1), numFrames));
+        const float db = 20.0f * std::log10(std::max(rms, 1e-6f));
+        const float target = std::clamp((db + 65.0f) / 60.0f, 0.0f, 1.0f);
         const float prev = spectrumLevels_[b].load(std::memory_order_relaxed);
         const float smoothed = (target > prev)
                                    ? (0.45f * prev + 0.55f * target)

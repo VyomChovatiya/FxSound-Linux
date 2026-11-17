@@ -10,7 +10,7 @@ compatibility service or PulseAudio.
 
 ## Status
 
-On the `original-dsp-integration` branch the original FxSound DSP replaces the custom effects. See [integration notes](docs/original-dsp-integration.md). The main branch uses a custom implementation. Identical sound or feature parity with the
+The application uses the original FxSound DSP with a Linux compatibility layer. See [integration notes](docs/original-dsp-integration.md). Identical sound or feature parity with the
 Windows FxSound engine has **not** been established. Existing DSP tests check
 this implementation's behavior; they are not Windows reference comparisons.
 
@@ -31,7 +31,7 @@ ctest --test-dir build --output-on-failure
 ./build/fxsound
 ```
 
-Run from the repository checkout so assets and presets can be located. The app
+Builds bundle artwork and presets in a resources directory beside the executable. Keep that directory with the executable. The app
 changes the default audio sink while processing is active. Select the intended
 physical output in the output selector. Use the tray's Exit action to quit.
 
