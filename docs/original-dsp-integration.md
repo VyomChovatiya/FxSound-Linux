@@ -19,14 +19,13 @@ Resetting custom analysis states does not yet explicitly flush the original
 engine's reverb state. Live output, Bluetooth, reconnect and listening comparisons
 remain to be tested. The separate PipeWire backend is not included.
 
-Build on a filesystem supporting backslashes in include-shim filenames:
+Build directly in the project directory:
 
 ```
-cmake -S . -B /tmp/reversefx-original-build -DCMAKE_BUILD_TYPE=Debug
-cmake --build /tmp/reversefx-original-build -j4
-ctest --test-dir /tmp/reversefx-original-build --output-on-failure
-/tmp/reversefx-original-build/fxsound
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j4
+ctest --test-dir build --output-on-failure
+./build/fxsound
 ```
 
-Artwork and presets are bundled beside the executable, so it can launch from any directory. Existing `build/fxsound`
-is the previous executable and is not replaced by this build.
+Artwork and presets are bundled beside the executable, so it can launch from any directory. The current executable is `build/fxsound`. No temporary build directory is required.
